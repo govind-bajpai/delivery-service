@@ -2,13 +2,13 @@ package com.assignment.delivery.handler;
 
 import com.assignment.delivery.enums.OrderStatus;
 import com.assignment.delivery.enums.Status;
+import com.assignment.delivery.exception.DeliveryPersonAssignmentException;
 import com.assignment.delivery.exception.DeliveryPersonNotFoundException;
 import com.assignment.delivery.model.DeliveryPerson;
 import com.assignment.delivery.model.Order;
 import com.assignment.delivery.model.OrderPersonMapRequest;
 import com.assignment.delivery.repository.DeliveryPersonRepository;
 import org.apache.commons.lang3.StringUtils;
-import org.graalvm.compiler.replacements.PEGraphDecoder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -17,10 +17,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import javax.xml.crypto.Data;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 
 @Component
 public class DeliveryHandler {
@@ -31,7 +28,7 @@ public class DeliveryHandler {
     @Autowired
     private RestTemplate restTemplate;
     
-    @Value("${order.url:http://localhost:8084/orders/}")
+    @Value("${order.uri:http://localhost:8084/orders/}")
     private String orderUri;
     
     @Value("${order.status.update.endpoint:%s/status/}")
@@ -39,6 +36,7 @@ public class DeliveryHandler {
     
     
     public List<DeliveryPerson> getDeliveryPersons(Status status) {
+        updateDeliveryStatus();
         return repository.getDeliveryPersonByStatus(status);
     }
     
@@ -64,18 +62,24 @@ public class DeliveryHandler {
         if(null == person){
             throw new DeliveryPersonNotFoundException("Delivery Person not found for id: "+id);
         }
-        return person;
+        return updatePersonsDeliveryStatus(Arrays.asList(person)).get(0);
     }
     
     public List<DeliveryPerson> getAllDeliveryPersons() {
-        return repository.getAllDeliveryPersons();
+        return updatePersonsDeliveryStatus(repository.getAllDeliveryPersons());
     }
     
     public String mapOrderToDeliveryPerson(OrderPersonMapRequest request){
         validateOrderPersonMapRequest(request);
         DeliveryPerson person = repository.getDeliveryPersonById(request.getDeliveryPersonId());
+        if(null == person){
+            throw new DeliveryPersonNotFoundException("Delivery Person not found for id: "+request.getDeliveryPersonId());
+        }
         if(person.getOrderId() != null){
-            //if(person.getTatRemaining() )
+            updatePersonsDeliveryStatus(Arrays.asList(person));
+            if(person.getIsActive()){
+               throw new DeliveryPersonAssignmentException("Order is already assigned to delivery Person");
+            }
         }
         Order order = null;
         try {
@@ -83,11 +87,15 @@ public class DeliveryHandler {
         }catch (Exception e){
             System.out.println("Error while fetching the order for orderId"+request.getOrderId());
         }
+        if(order.getStatus().equals(OrderStatus.DELIVERED) || order.getStatus().equals(OrderStatus.ACCEPTED)){
+            throw new DeliveryPersonAssignmentException("Order is already Accepted or Delivered by delivery Person");
+        }
         person.setOrderId(order.getId());
         person.setOrderAssignedTime(new Date());
         person.setIsActive(true);
         person.setStatus(Status.OUT_FOR_DELIVERY);
-        person.setTatRemaining(order.getTatDelivery());
+        person.setTatTime(order.getTatDelivery());
+        person.setTatRemaining(calculateTatRemaining(person));
         updateOrderStatus(order.getId(), OrderStatus.ACCEPTED.name());
         if(null == order){
             throw new DeliveryPersonNotFoundException("Delivery Person not found for id: "+request.getDeliveryPersonId());
@@ -131,31 +139,33 @@ public class DeliveryHandler {
         }
     }
     
-    public static void main(String[] args) {
-        RestTemplate template = new RestTemplate();
-        Order order = template.getForObject("http://localhost:8084/orders/1",Order.class);
-    }
-    
     
     public List<DeliveryPerson> updateDeliveryStatus() {
         List<DeliveryPerson> persons = repository.getDeliveryPersonByStatus(Status.OUT_FOR_DELIVERY);
+        return updatePersonsDeliveryStatus(persons);
+    }
+    
+    public List<DeliveryPerson> updatePersonsDeliveryStatus(List<DeliveryPerson> persons) {
         List<DeliveryPerson> result = new ArrayList<>();
-
+        
         for(DeliveryPerson person : persons){
-            Long remainingTime = calculateTatRemaining(person);
-            if(remainingTime < 0){
-                updateOrderStatus(person.getOrderId(), OrderStatus.DELIVERED.name());
-                updatePerson(person);
-            }else{
-                person.setTatRemaining((remainingTime/(60*1000)));
+            if(person.getIsActive()) {
+                Long remainingTime = calculateTatRemaining(person);
+                if (remainingTime < 0) {
+                    updateOrderStatus(person.getOrderId(), OrderStatus.DELIVERED.name());
+                    updatePerson(person);
+                } else {
+                    person.setTatRemaining(remainingTime);
+                }
             }
             result.add(repository.getDeliveryPersonById(person.getId()));
         }
         return  result;
     }
+    
     public Long calculateTatRemaining(DeliveryPerson person){
         Date currentDate = new Date();
-        return (person.getTatRemaining()*60*1000 + person.getOrderAssignedTime().getTime() - currentDate.getTime());
+        return (person.getTatTime() + person.getOrderAssignedTime().getTime() - currentDate.getTime());
     }
     
     private void updatePerson(DeliveryPerson person) {

@@ -30,6 +30,7 @@ public class DeliveryPerson implements Serializable {
     private Status status;
     @JsonProperty("tatRemaining")
     private Long tatRemaining;
+    private Long tatTime;
     @JsonProperty("orderAssignedTime")
     private Date orderAssignedTime;
 }
